@@ -21,7 +21,7 @@ TARGET_SITES = [
         'base_url': '',
         'selector': 'li:not(:has(span.notice)) .subject a',
         # ✨ 인공지능 연합전공 전용 '링크 조립 설명서' 추가
-        'link_format': 'https://imai.snu.ac.kr/archives/{idx}',
+        'link_format': 'https://imai.snu.ac.kr/category/board-21-GN-n5xFXM59-20210303165043/?uid={idx}&mod=document',
     },
     # 여기에 계속 추가할 수 있어!
 ]
@@ -94,4 +94,5 @@ def crawl_and_notify():
 
 # 이 스크립트 파일을 직접 실행했을 때만 함수를 실행
 if __name__ == "__main__":
+
     crawl_and_notify()
