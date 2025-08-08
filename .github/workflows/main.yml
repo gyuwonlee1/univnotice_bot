@@ -16,6 +16,9 @@ jobs:
     # 이 코드를 어떤 환경에서 실행할지 (최신 우분투 리눅스)
     runs-on: ubuntu-latest
 
+    permissions: 
+      contents: write
+
     # 작업 단계들
     steps:
     # 1. 내 저장소에 있는 코드를 가상 컴퓨터로 가져오는 단계
