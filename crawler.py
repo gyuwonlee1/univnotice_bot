@@ -80,7 +80,7 @@ def crawl_and_notify():
 
                 # --- 링크 주소 처리 로직 끝 ---
 
-                message = f"📢 **[{site_name}]** 새 공지!\n\n**{title}**\n{link}"
+                message = f"📢 **[{site_name}]** 새 공지!\n\n#{title}\n{link}"
                 send_discord_message(message)
             else:
                 print(f"[{site_name}]에서 새 공지를 찾지 못했어.")
@@ -96,3 +96,4 @@ def crawl_and_notify():
 if __name__ == "__main__":
 
     crawl_and_notify()
+
