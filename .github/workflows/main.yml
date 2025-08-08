@@ -6,7 +6,7 @@ on:
   schedule:
     # cron 스케줄 문법: 분 시 일 월 요일
     # 아래는 매 시간 정각에 코드를 실행하라는 의미
-    - cron: '0 * * * *'
+    - cron: '*/30 * * * *'
   # Actions 탭에서 수동으로도 실행할 수 있게 해주는 옵션
   workflow_dispatch:
 
