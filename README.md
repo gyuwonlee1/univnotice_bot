@@ -56,6 +56,18 @@ python crawler.py
 - 스케줄/수동 실행은 `.github/workflows/main.yml`을 참고하세요.
 - 상태는 `latest_links.json`에 저장되며, GitHub Actions가 변경 시 커밋할 수 있습니다.
 
+## 잠재 이슈 / 운영 시 유의점
+
+- **동시 실행**: 같은 시각에 Actions가 두 번 겹치면 `latest_links.json` 커밋 충돌이 날 수 있습니다. 스케줄 간격을 넉넉히 두거나, 필요하면 concurrency 제한을 고려하세요.
+- **Discord**: 메시지는 약 2000자 제한이 있어, 제목이 매우 길면 본문이 잘려 전송됩니다.
+- **사이트 차단/구조 변경**: 추출 개수가 `MIN_NOTICE_COUNT` 미만이면 경고와 HTML 스냅샷(artifact)으로 확인할 수 있습니다.
+- **상세 NDJSON 로그(선택)**: 문제 재현 시 아래처럼 켜면 `debug-0d12c9.log`에 단계별 상태가 기록됩니다.
+
+```powershell
+$env:AGENT_DEBUG_NDJSON="1"
+python crawler.py
+```
+
 ## 지금 바로 “채널 라우팅”이 맞는지 확인하기 (새 공지 없어도 됨)
 
 GitHub Actions를 수동 실행할 때 `test_webhooks=true`로 실행하면, **사이트별로 1개의 테스트 메시지**를 각 채널로 보냅니다.

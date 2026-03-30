@@ -65,6 +65,30 @@ MAX_STORED_LINKS_PER_SITE = int(os.environ.get('MAX_STORED_LINKS_PER_SITE', '200
 MAX_SEND_PER_SITE_PER_RUN = int(os.environ.get('MAX_SEND_PER_SITE_PER_RUN', '20'))
 TEST_WEBHOOKS = os.environ.get('TEST_WEBHOOKS', '0') == '1'
 
+# region agent log
+_AGENT_DEBUG_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug-0d12c9.log")
+AGENT_DEBUG_NDJSON = os.environ.get("AGENT_DEBUG_NDJSON", "0") == "1"
+DISCORD_MAX_CONTENT_LEN = 2000
+
+
+def _agent_dbg(hypothesis_id: str, location: str, message: str, data: dict):
+    if not AGENT_DEBUG_NDJSON:
+        return
+    try:
+        payload = {
+            "sessionId": "0d12c9",
+            "timestamp": int(time.time() * 1000),
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+        }
+        with open(_AGENT_DEBUG_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+# endregion
+
 
 def resolve_webhook_url(site: dict | None) -> str | None:
     """사이트별 웹훅(DISCORD_WEBHOOK_*) 우선, 없으면 DISCORD_WEBHOOK_URL 폴백."""
@@ -80,6 +104,24 @@ def resolve_webhook_url(site: dict | None) -> str | None:
 def send_discord_message(text, webhook_url: str | None = None):
     """디스코드로 메시지를 보내는 함수. webhook_url이 None이면 DISCORD_WEBHOOK_URL 사용."""
     url = webhook_url if webhook_url is not None else os.environ.get('DISCORD_WEBHOOK_URL')
+    if len(text) > DISCORD_MAX_CONTENT_LEN:
+        # region agent log
+        _agent_dbg(
+            "H2",
+            "crawler.py:send_discord_message",
+            "content_truncated",
+            {"original_len": len(text), "max": DISCORD_MAX_CONTENT_LEN},
+        )
+        # endregion
+        text = text[: DISCORD_MAX_CONTENT_LEN - 30] + "\n...(truncated)"
+    # region agent log
+    _agent_dbg(
+        "H2",
+        "crawler.py:send_discord_message",
+        "discord_send_attempt",
+        {"content_len": len(text), "has_webhook": bool(url)},
+    )
+    # endregion
     if not url:
         print("디스코드 웹훅 URL이 설정되지 않았어. 로컬 테스트 모드로 실행할게.")
         # Windows 콘솔(cp949 등)에서 이모지/특수문자가 있을 때도 크래시가 나지 않도록 안전 출력
@@ -91,7 +133,15 @@ def send_discord_message(text, webhook_url: str | None = None):
         return
 
     data = {"content": text}
-    response = requests.post(url, json=data)
+    response = requests.post(url, json=data, timeout=15)
+    # region agent log
+    _agent_dbg(
+        "H2",
+        "crawler.py:send_discord_message",
+        "discord_response",
+        {"status_code": response.status_code},
+    )
+    # endregion
     if response.status_code == 204:
         print("디스코드 메시지 전송 성공!")
     else:
@@ -139,6 +189,16 @@ def load_latest_links():
                         migrated[k] = []
             return migrated, legacy_anchors
     except FileNotFoundError:
+        return {}, {}
+    except json.JSONDecodeError as e:
+        # region agent log
+        _agent_dbg(
+            "H5",
+            "crawler.py:load_latest_links",
+            "json_decode_error",
+            {"error": str(e)},
+        )
+        # endregion
         return {}, {}
 
 def save_latest_links(links):
@@ -254,10 +314,39 @@ def normalize_and_filter_notices(site: dict, anchors):
 def crawl_and_notify():
     """홈페이지 목록을 돌면서 '새로운' 공지만 확인하고 알림을 보내는 함수"""
     print("[INFO] 전체 공지사항 확인을 시작합니다...")
+    # region agent log
+    _agent_dbg(
+        "H1",
+        "crawler.py:crawl_and_notify",
+        "run_start",
+        {
+            "TEST_WEBHOOKS": TEST_WEBHOOKS,
+            "FAIL_ON_SITE_FAILURE": FAIL_ON_SITE_FAILURE,
+            "MIN_NOTICE_COUNT": MIN_NOTICE_COUNT,
+            "webhook_env_set": {
+                "DISCORD_WEBHOOK_ECON": bool(os.environ.get("DISCORD_WEBHOOK_ECON")),
+                "DISCORD_WEBHOOK_IMAI": bool(os.environ.get("DISCORD_WEBHOOK_IMAI")),
+                "DISCORD_WEBHOOK_CBA": bool(os.environ.get("DISCORD_WEBHOOK_CBA")),
+                "DISCORD_WEBHOOK_URL": bool(os.environ.get("DISCORD_WEBHOOK_URL")),
+            },
+        },
+    )
+    # endregion
 
     maybe_send_test_messages()
     
     latest_links, legacy_anchors = load_latest_links()
+    # region agent log
+    _agent_dbg(
+        "H4",
+        "crawler.py:crawl_and_notify",
+        "state_loaded",
+        {
+            "site_keys": list(latest_links.keys()),
+            "legacy_anchor_sites": list(legacy_anchors.keys()),
+        },
+    )
+    # endregion
     new_announcement_found = False
     site_failures = []
     site_warnings = []
@@ -284,6 +373,14 @@ def crawl_and_notify():
             all_notices = normalize_and_filter_notices(site, anchors)
 
             if len(all_notices) < MIN_NOTICE_COUNT:
+                # region agent log
+                _agent_dbg(
+                    "H3",
+                    "crawler.py:crawl_and_notify",
+                    "too_few_notices_branch",
+                    {"site": site_name, "count": len(all_notices), "min": MIN_NOTICE_COUNT},
+                )
+                # endregion
                 # 구조 변경/selector 실패 가능성이 높아서 증거 확보 + 경고
                 save_debug_html(site_name, site["url"], response.text, f"too_few_{len(all_notices)}")
                 send_discord_warning(
@@ -308,6 +405,14 @@ def crawl_and_notify():
 
             # legacy 상태였으면 "anchor까지 break" 방식으로 1회만 기존 동작을 유지 (알림 폭탄 방지)
             legacy_anchor = legacy_anchors.get(site_name)
+            # region agent log
+            _agent_dbg(
+                "H4",
+                "crawler.py:crawl_and_notify",
+                "dedupe_mode",
+                {"site": site_name, "legacy_anchor": bool(legacy_anchor), "seen_size": len(seen_links)},
+            )
+            # endregion
             if legacy_anchor:
                 for notice in all_notices:
                     link = notice["link"]
@@ -337,6 +442,14 @@ def crawl_and_notify():
 
 
             if new_notices_to_send:
+                # region agent log
+                _agent_dbg(
+                    "H1",
+                    "crawler.py:crawl_and_notify",
+                    "new_notices_detected",
+                    {"site": site_name, "count": len(new_notices_to_send)},
+                )
+                # endregion
                 # 너무 많이 보내는 것을 방지
                 total_new = len(new_notices_to_send)
                 if total_new > MAX_SEND_PER_SITE_PER_RUN:
@@ -407,8 +520,25 @@ def crawl_and_notify():
         print("[ERROR] 사이트 실패 요약:")
         for name, reason in site_failures:
             print(f"  - {name}: {reason}")
+        # region agent log
+        _agent_dbg(
+            "H5",
+            "crawler.py:crawl_and_notify",
+            "run_end_failures",
+            {"failures": site_failures, "warnings": site_warnings},
+        )
+        # endregion
         if FAIL_ON_SITE_FAILURE:
             raise SystemExit(2)
+    else:
+        # region agent log
+        _agent_dbg(
+            "H5",
+            "crawler.py:crawl_and_notify",
+            "run_end_ok",
+            {"warnings": site_warnings, "saved_state": new_announcement_found},
+        )
+        # endregion
 
 if __name__ == "__main__":
 
