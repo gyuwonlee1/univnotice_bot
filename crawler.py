@@ -9,6 +9,8 @@ from urllib.parse import urljoin
 TARGET_SITES = [
     {
         'name': '서울대학교 경제학부',
+        # 환경변수 이름: GitHub Secrets / 로컬 .env 에 동일 이름으로 웹훅 URL 저장
+        'webhook_env': 'DISCORD_WEBHOOK_ECON',
         'url': 'https://econ.snu.ac.kr/announcement/notice',
         'base_url': 'https://econ.snu.ac.kr',
         'selectors': [
@@ -21,6 +23,7 @@ TARGET_SITES = [
     },
     {
         'name': '서울대학교 인공지능 연합전공',
+        'webhook_env': 'DISCORD_WEBHOOK_IMAI',
         'url': 'https://imai.snu.ac.kr/category/board-21-GN-n5xFXM59-20210303165043/',
         'base_url': '',
         'link_format': 'https://imai.snu.ac.kr/category/board-21-GN-n5xFXM59-20210303165043/?uid={idx}&mod=document',
@@ -37,7 +40,8 @@ TARGET_SITES = [
         ],
     },
     {
-        'name': '서울대학교 경영대학', 
+        'name': '서울대학교 경영대학',
+        'webhook_env': 'DISCORD_WEBHOOK_CBA',
         'url': 'https://cba.snu.ac.kr/newsroom/notice',
         'base_url': 'https://cba.snu.ac.kr',
         'selectors': [
@@ -51,7 +55,6 @@ TARGET_SITES = [
 ]
 
 LATEST_LINKS_FILE = 'latest_links.json'
-webhook_url = os.environ.get('DISCORD_WEBHOOK_URL')
 DEBUG_DIR = os.environ.get('DEBUG_HTML_DIR', 'debug_html')
 DEBUG_SAVE_HTML = os.environ.get('DEBUG_SAVE_HTML', '1') == '1'
 MIN_NOTICE_COUNT = int(os.environ.get('MIN_NOTICE_COUNT', '3'))
@@ -61,9 +64,22 @@ FAIL_ON_SITE_FAILURE = os.environ.get('FAIL_ON_SITE_FAILURE', '0') == '1'
 MAX_STORED_LINKS_PER_SITE = int(os.environ.get('MAX_STORED_LINKS_PER_SITE', '200'))
 MAX_SEND_PER_SITE_PER_RUN = int(os.environ.get('MAX_SEND_PER_SITE_PER_RUN', '20'))
 
-def send_discord_message(text):
-    """디스코드로 메시지를 보내는 함수"""
-    if not webhook_url:
+
+def resolve_webhook_url(site: dict | None) -> str | None:
+    """사이트별 웹훅(DISCORD_WEBHOOK_*) 우선, 없으면 DISCORD_WEBHOOK_URL 폴백."""
+    if site:
+        env_key = site.get('webhook_env')
+        if env_key:
+            url = os.environ.get(env_key)
+            if url:
+                return url
+    return os.environ.get('DISCORD_WEBHOOK_URL')
+
+
+def send_discord_message(text, webhook_url: str | None = None):
+    """디스코드로 메시지를 보내는 함수. webhook_url이 None이면 DISCORD_WEBHOOK_URL 사용."""
+    url = webhook_url if webhook_url is not None else os.environ.get('DISCORD_WEBHOOK_URL')
+    if not url:
         print("디스코드 웹훅 URL이 설정되지 않았어. 로컬 테스트 모드로 실행할게.")
         # Windows 콘솔(cp949 등)에서 이모지/특수문자가 있을 때도 크래시가 나지 않도록 안전 출력
         try:
@@ -74,17 +90,17 @@ def send_discord_message(text):
         return
 
     data = {"content": text}
-    response = requests.post(webhook_url, json=data)
+    response = requests.post(url, json=data)
     if response.status_code == 204:
         print("디스코드 메시지 전송 성공!")
     else:
         print(f"디스코드 메시지 전송 실패: {response.status_code}")
 
-def send_discord_warning(site_name: str, reason: str, extra: str = ""):
+def send_discord_warning(site_name: str, reason: str, extra: str = "", site: dict | None = None):
     message = f"[WARN] **[{site_name}]** 크롤링 경고\n\n- 이유: {reason}"
     if extra:
         message += f"\n- 추가정보: {extra}"
-    send_discord_message(message)
+    send_discord_message(message, webhook_url=resolve_webhook_url(site))
 
 def load_latest_links():
     """파일에 저장된 '마지막 공지 링크'를 불러오는 함수"""
@@ -241,7 +257,7 @@ def crawl_and_notify():
             response.raise_for_status()
             if _looks_like_blocked_or_wrong_page(response.text):
                 save_debug_html(site_name, site["url"], response.text, "blocked_or_wrong")
-                send_discord_warning(site_name, "차단/로그인/비정상 페이지로 보임", f"url={site['url']}")
+                send_discord_warning(site_name, "차단/로그인/비정상 페이지로 보임", f"url={site['url']}", site=site)
                 site_failures.append((site_name, "blocked_or_wrong"))
                 continue
             soup = BeautifulSoup(response.text, 'html.parser')
@@ -256,6 +272,7 @@ def crawl_and_notify():
                     site_name,
                     "공지 추출 개수가 너무 적음(구조 변경 가능)",
                     f"count={len(all_notices)} (min={MIN_NOTICE_COUNT}), url={site['url']}",
+                    site=site,
                 )
                 site_warnings.append((site_name, f"too_few_{len(all_notices)}"))
                 # 그래도 1개라도 있으면 “새 공지” 체크는 진행 (완전 중단 대신 부분 동작)
@@ -310,6 +327,7 @@ def crawl_and_notify():
                         site_name,
                         "새 공지가 너무 많아 일부만 전송(상태 유실/구조 변경 가능)",
                         f"new={total_new}, send_cap={MAX_SEND_PER_SITE_PER_RUN}, url={site['url']}",
+                        site=site,
                     )
                     site_warnings.append((site_name, f"too_many_new_{total_new}"))
                     new_notices_to_send = new_notices_to_send[:MAX_SEND_PER_SITE_PER_RUN]
@@ -339,19 +357,19 @@ def crawl_and_notify():
                 
                 for notice_data in new_notices_to_send:
                     message = f"📢 **[{site_name}]** 새 공지!\n\n# {notice_data['title']}\n{notice_data['link']}"
-                    send_discord_message(message)
+                    send_discord_message(message, webhook_url=resolve_webhook_url(site))
             else:
                 print("[SKIP] 이미 보냈던 공지입니다. 알림을 보내지 않습니다.")
 
         except requests.RequestException as e:
             save_debug_html(site_name, site["url"], getattr(locals().get("response", None), "text", "") or "", "request_exception")
             print(f"[{site_name}] 접속 오류가 발생했어: {e}")
-            send_discord_warning(site_name, "접속/HTTP 오류", str(e))
+            send_discord_warning(site_name, "접속/HTTP 오류", str(e), site=site)
             site_failures.append((site_name, "request_exception"))
         except Exception as e:
             save_debug_html(site_name, site["url"], getattr(locals().get("response", None), "text", "") or "", "unknown_exception")
             print(f"[{site_name}] 처리 중 알 수 없는 오류가 발생했어: {e}")
-            send_discord_warning(site_name, "알 수 없는 오류", str(e))
+            send_discord_warning(site_name, "알 수 없는 오류", str(e), site=site)
             site_failures.append((site_name, "unknown_exception"))
         
         print(f"--- [{site_name}] 확인 완료 ---\n")
