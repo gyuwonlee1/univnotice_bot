@@ -63,6 +63,7 @@ MAX_DEBUG_HTML_BYTES = int(os.environ.get('MAX_DEBUG_HTML_BYTES', str(2_000_000)
 FAIL_ON_SITE_FAILURE = os.environ.get('FAIL_ON_SITE_FAILURE', '0') == '1'
 MAX_STORED_LINKS_PER_SITE = int(os.environ.get('MAX_STORED_LINKS_PER_SITE', '200'))
 MAX_SEND_PER_SITE_PER_RUN = int(os.environ.get('MAX_SEND_PER_SITE_PER_RUN', '20'))
+TEST_WEBHOOKS = os.environ.get('TEST_WEBHOOKS', '0') == '1'
 
 
 def resolve_webhook_url(site: dict | None) -> str | None:
@@ -101,6 +102,21 @@ def send_discord_warning(site_name: str, reason: str, extra: str = "", site: dic
     if extra:
         message += f"\n- 추가정보: {extra}"
     send_discord_message(message, webhook_url=resolve_webhook_url(site))
+
+
+def maybe_send_test_messages():
+    """새 공지가 없어도 채널별 라우팅이 맞는지 빠르게 확인하는 용도."""
+    if not TEST_WEBHOOKS:
+        return
+
+    ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    for site in TARGET_SITES:
+        url = resolve_webhook_url(site)
+        # url이 없으면 로컬 테스트 모드로 콘솔에만 찍힘
+        send_discord_message(
+            f"[TEST] webhook routing OK?\n- site: {site['name']}\n- time: {ts}",
+            webhook_url=url,
+        )
 
 def load_latest_links():
     """파일에 저장된 '마지막 공지 링크'를 불러오는 함수"""
@@ -238,6 +254,8 @@ def normalize_and_filter_notices(site: dict, anchors):
 def crawl_and_notify():
     """홈페이지 목록을 돌면서 '새로운' 공지만 확인하고 알림을 보내는 함수"""
     print("[INFO] 전체 공지사항 확인을 시작합니다...")
+
+    maybe_send_test_messages()
     
     latest_links, legacy_anchors = load_latest_links()
     new_announcement_found = False

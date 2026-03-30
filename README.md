@@ -55,3 +55,14 @@ python crawler.py
 
 - 스케줄/수동 실행은 `.github/workflows/main.yml`을 참고하세요.
 - 상태는 `latest_links.json`에 저장되며, GitHub Actions가 변경 시 커밋할 수 있습니다.
+
+## 지금 바로 “채널 라우팅”이 맞는지 확인하기 (새 공지 없어도 됨)
+
+GitHub Actions를 수동 실행할 때 `test_webhooks=true`로 실행하면, **사이트별로 1개의 테스트 메시지**를 각 채널로 보냅니다.
+
+로컬 테스트:
+
+```powershell
+$env:TEST_WEBHOOKS = \"1\"
+python crawler.py
+```

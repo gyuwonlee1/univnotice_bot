@@ -9,6 +9,11 @@ on:
     - cron: '*/30 * * * *'
   # Actions 탭에서 수동으로도 실행할 수 있게 해주는 옵션
   workflow_dispatch:
+    inputs:
+      test_webhooks:
+        description: "Send 1 test message per site (no new notice required)"
+        required: false
+        default: "false"
 
 # 실제 작업 내용
 jobs:
@@ -55,6 +60,7 @@ jobs:
         FAIL_ON_SITE_FAILURE: "1"
         MAX_STORED_LINKS_PER_SITE: "200"
         MAX_SEND_PER_SITE_PER_RUN: "20"
+        TEST_WEBHOOKS: ${{ github.event.inputs.test_webhooks == 'true' && '1' || '0' }}
 
     - name: Upload debug HTML artifacts (always)
       if: always()
