@@ -110,18 +110,76 @@ def send_discord_warning(site_name: str, reason: str, extra: str = "", site: dic
     send_discord_message(message, webhook_url=resolve_webhook_url(site))
 
 
-def _response_fingerprint(html_text: str) -> str:
-    raw = html_text.encode("utf-8", errors="replace")
+def _stable_page_fingerprint(html_text: str) -> str:
+    """
+    동적 HTML(스크립트·타임스탬프 등)에 덜 민감한 지문.
+    script/style 제거 후 가시 텍스트만 정규화해 해시한다.
+    """
+    soup = BeautifulSoup(html_text, "html.parser")
+    for tag in soup(["script", "style", "noscript"]):
+        tag.decompose()
+    text = soup.get_text(separator="\n")
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"\d{8,}", "<NUM>", text)
+    text = re.sub(r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?", "<DT>", text)
+    raw = text.encode("utf-8", errors="replace")
     if len(raw) > MAX_DEBUG_HTML_BYTES:
         raw = raw[:MAX_DEBUG_HTML_BYTES]
     return hashlib.sha256(raw).hexdigest()
+
+
+def _notice_fingerprint(all_notices: list) -> str:
+    """추출된 공지 링크·제목 기준 지문 (추출 개수가 0↔1 사이로 흔들려도 페이지 본문 지문과 함께 쓰면 안정적)."""
+    items = []
+    for n in all_notices:
+        if not isinstance(n, dict):
+            continue
+        title = (n.get("title") or "").strip()
+        link = (n.get("link") or "").strip()
+        items.append((link, title))
+    items.sort(key=lambda x: x[0])
+    payload = json.dumps(items, ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _too_few_combined_fingerprint(html_text: str, all_notices: list) -> str:
+    return hashlib.sha256(
+        (_notice_fingerprint(all_notices) + "|" + _stable_page_fingerprint(html_text)).encode()
+    ).hexdigest()
+
+
+def _migrate_warn_state(state: dict) -> dict:
+    """레거시(사이트당 flat body_sha256) → { too_few, blocked } 구조."""
+    out = {}
+    for site_name, entry in state.items():
+        if not isinstance(entry, dict):
+            continue
+        if "too_few" in entry or "blocked" in entry:
+            out[site_name] = {
+                "too_few": entry["too_few"] if isinstance(entry.get("too_few"), dict) else {},
+                "blocked": entry["blocked"] if isinstance(entry.get("blocked"), dict) else {},
+            }
+            continue
+        if "body_sha256" in entry or "issue_key" in entry:
+            out[site_name] = {
+                "too_few": {
+                    "fp": entry.get("body_sha256"),
+                    "last_sent_at": entry.get("last_sent_at"),
+                },
+                "blocked": {},
+            }
+        else:
+            out[site_name] = {"too_few": {}, "blocked": {}}
+    return out
 
 
 def load_warn_dedupe_state() -> dict:
     try:
         with open(WARN_DEDUPE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-            return data if isinstance(data, dict) else {}
+            if not isinstance(data, dict):
+                return {}
+            return _migrate_warn_state(data)
     except FileNotFoundError:
         return {}
     except json.JSONDecodeError as e:
@@ -135,29 +193,49 @@ def save_warn_dedupe_state(state: dict) -> None:
         f.write("\n")
 
 
+def _ensure_site_warn_buckets(warn_state: dict, site_name: str) -> dict:
+    entry = warn_state.setdefault(site_name, {})
+    if not isinstance(entry, dict):
+        entry = {}
+        warn_state[site_name] = entry
+    if "too_few" not in entry and "blocked" not in entry:
+        if entry.get("body_sha256") or entry.get("issue_key"):
+            migrated = {
+                "too_few": {
+                    "fp": entry.get("body_sha256"),
+                    "last_sent_at": entry.get("last_sent_at"),
+                },
+                "blocked": {},
+            }
+            warn_state[site_name] = migrated
+            return migrated
+        entry.setdefault("too_few", {})
+        entry.setdefault("blocked", {})
+    entry.setdefault("too_few", {})
+    entry.setdefault("blocked", {})
+    return warn_state[site_name]
+
+
 def send_discord_warning_too_few_deduped(
     site_name: str,
     notice_count: int,
     html_text: str,
+    all_notices: list,
     site: dict,
     warn_state: dict,
 ) -> bool:
     """
-    공지 추출이 MIN 미만일 때만 Discord 경고를 보냄.
-    동일 사이트에서 (이슈 키 + HTML 지문)이 직전과 같으면 Discord로는 보내지 않음
-    (비공개 test 공지 등으로 매 run 동일한 응답이 반복되는 스팸 방지).
-    페이지/추출 개수가 바뀌면 다시 전송.
-    반환: warn_state를 저장해야 하면 True.
+    공지 추출이 MIN 미만일 때만 Discord 경고.
+    원시 HTML 해시 대신 (추출 목록 지문 + 정규화된 페이지 텍스트 지문)으로 중복 판단해
+    매 요청마다 바뀌는 HTML/동적 필드로 인한 스팸을 줄인다.
     """
-    issue_key = f"too_few_{notice_count}"
-    fp = _response_fingerprint(html_text)
-    entry = warn_state.get(site_name) if isinstance(warn_state.get(site_name), dict) else {}
-    last_key = entry.get("issue_key")
-    last_fp = entry.get("body_sha256")
-    if last_key == issue_key and last_fp == fp:
+    fp = _too_few_combined_fingerprint(html_text, all_notices)
+    buckets = _ensure_site_warn_buckets(warn_state, site_name)
+    tf = buckets["too_few"]
+    if isinstance(tf, dict) and tf.get("fp") == fp:
         print(
-            f"[SKIP] [{site_name}] 동일한 '공지 부족' 상태로 Discord WARN 생략 "
-            f"(issue={issue_key}, fp={fp[:12]}...)"
+            f"[SKIP] [{site_name}] 동일한 '공지 부족' 지문으로 Discord WARN 생략 "
+            f"(fp={fp[:12]}...)"
         )
         return False
 
@@ -167,11 +245,29 @@ def send_discord_warning_too_few_deduped(
         f"count={notice_count} (min={MIN_NOTICE_COUNT}), url={site['url']}",
         site=site,
     )
-    warn_state[site_name] = {
-        "issue_key": issue_key,
-        "body_sha256": fp,
-        "last_sent_at": int(time.time()),
-    }
+    buckets["too_few"] = {"fp": fp, "last_sent_at": int(time.time())}
+    return True
+
+
+def send_discord_warning_blocked_deduped(
+    site_name: str,
+    html_text: str,
+    site: dict,
+    warn_state: dict,
+) -> bool:
+    """차단/비정상 페이지 판정 시에도 동일 페이지면 Discord WARN 중복 방지."""
+    fp = _stable_page_fingerprint(html_text)
+    buckets = _ensure_site_warn_buckets(warn_state, site_name)
+    blk = buckets["blocked"]
+    if isinstance(blk, dict) and blk.get("fp") == fp:
+        print(
+            f"[SKIP] [{site_name}] 동일한 '차단/비정상' 페이지 지문으로 Discord WARN 생략 "
+            f"(fp={fp[:12]}...)"
+        )
+        return False
+
+    send_discord_warning(site_name, "차단/로그인/비정상 페이지로 보임", f"url={site['url']}", site=site)
+    buckets["blocked"] = {"fp": fp, "last_sent_at": int(time.time())}
     return True
 
 
@@ -252,8 +348,7 @@ def _looks_like_blocked_or_wrong_page(text: str) -> bool:
         "cf-turnstile",
         "g-recaptcha",
         "hcaptcha",
-        "권한이 없습니다",
-        "접근이 제한",
+        # '권한이 없습니다' 등은 게시글 제목/목록에도 나와 오탐이 잦아 제외함
     ]
     return any(s in lowered for s in suspicious)
 
@@ -351,7 +446,8 @@ def crawl_and_notify():
             response.raise_for_status()
             if _looks_like_blocked_or_wrong_page(response.text):
                 save_debug_html(site_name, site["url"], response.text, "blocked_or_wrong")
-                send_discord_warning(site_name, "차단/로그인/비정상 페이지로 보임", f"url={site['url']}", site=site)
+                if send_discord_warning_blocked_deduped(site_name, response.text, site, warn_state):
+                    warn_state_dirty = True
                 site_failures.append((site_name, "blocked_or_wrong"))
                 continue
             soup = BeautifulSoup(response.text, 'html.parser')
@@ -367,7 +463,7 @@ def crawl_and_notify():
                 # 구조 변경/selector 실패 가능성이 높아서 증거 확보 + 경고
                 save_debug_html(site_name, site["url"], response.text, f"too_few_{len(all_notices)}")
                 if send_discord_warning_too_few_deduped(
-                    site_name, len(all_notices), response.text, site, warn_state
+                    site_name, len(all_notices), response.text, all_notices, site, warn_state
                 ):
                     warn_state_dirty = True
                 site_warnings.append((site_name, f"too_few_{len(all_notices)}"))
