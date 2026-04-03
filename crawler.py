@@ -2,8 +2,9 @@ import requests
 from bs4 import BeautifulSoup
 import os
 import re
-import json 
+import json
 import time
+import hashlib
 from urllib.parse import urljoin
 
 TARGET_SITES = [
@@ -55,6 +56,7 @@ TARGET_SITES = [
 ]
 
 LATEST_LINKS_FILE = 'latest_links.json'
+WARN_DEDUPE_FILE = os.environ.get('WARN_DEDUPE_STATE_FILE', 'crawler_warn_state.json')
 DEBUG_DIR = os.environ.get('DEBUG_HTML_DIR', 'debug_html')
 DEBUG_SAVE_HTML = os.environ.get('DEBUG_SAVE_HTML', '1') == '1'
 MIN_NOTICE_COUNT = int(os.environ.get('MIN_NOTICE_COUNT', '3'))
@@ -106,6 +108,71 @@ def send_discord_warning(site_name: str, reason: str, extra: str = "", site: dic
     if extra:
         message += f"\n- 추가정보: {extra}"
     send_discord_message(message, webhook_url=resolve_webhook_url(site))
+
+
+def _response_fingerprint(html_text: str) -> str:
+    raw = html_text.encode("utf-8", errors="replace")
+    if len(raw) > MAX_DEBUG_HTML_BYTES:
+        raw = raw[:MAX_DEBUG_HTML_BYTES]
+    return hashlib.sha256(raw).hexdigest()
+
+
+def load_warn_dedupe_state() -> dict:
+    try:
+        with open(WARN_DEDUPE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except json.JSONDecodeError as e:
+        print(f"[WARN] {WARN_DEDUPE_FILE} JSON 파싱 실패: {e}. 빈 상태로 진행합니다.")
+        return {}
+
+
+def save_warn_dedupe_state(state: dict) -> None:
+    with open(WARN_DEDUPE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+
+
+def send_discord_warning_too_few_deduped(
+    site_name: str,
+    notice_count: int,
+    html_text: str,
+    site: dict,
+    warn_state: dict,
+) -> bool:
+    """
+    공지 추출이 MIN 미만일 때만 Discord 경고를 보냄.
+    동일 사이트에서 (이슈 키 + HTML 지문)이 직전과 같으면 Discord로는 보내지 않음
+    (비공개 test 공지 등으로 매 run 동일한 응답이 반복되는 스팸 방지).
+    페이지/추출 개수가 바뀌면 다시 전송.
+    반환: warn_state를 저장해야 하면 True.
+    """
+    issue_key = f"too_few_{notice_count}"
+    fp = _response_fingerprint(html_text)
+    entry = warn_state.get(site_name) if isinstance(warn_state.get(site_name), dict) else {}
+    last_key = entry.get("issue_key")
+    last_fp = entry.get("body_sha256")
+    if last_key == issue_key and last_fp == fp:
+        print(
+            f"[SKIP] [{site_name}] 동일한 '공지 부족' 상태로 Discord WARN 생략 "
+            f"(issue={issue_key}, fp={fp[:12]}...)"
+        )
+        return False
+
+    send_discord_warning(
+        site_name,
+        "공지 추출 개수가 너무 적음(구조 변경 가능)",
+        f"count={notice_count} (min={MIN_NOTICE_COUNT}), url={site['url']}",
+        site=site,
+    )
+    warn_state[site_name] = {
+        "issue_key": issue_key,
+        "body_sha256": fp,
+        "last_sent_at": int(time.time()),
+    }
+    return True
 
 
 def maybe_send_test_messages():
@@ -265,6 +332,8 @@ def crawl_and_notify():
     maybe_send_test_messages()
     
     latest_links, legacy_anchors = load_latest_links()
+    warn_state = load_warn_dedupe_state()
+    warn_state_dirty = False
     new_announcement_found = False
     site_failures = []
     site_warnings = []
@@ -290,15 +359,17 @@ def crawl_and_notify():
             anchors = extract_notice_anchors(site, soup)
             all_notices = normalize_and_filter_notices(site, anchors)
 
+            if len(all_notices) >= MIN_NOTICE_COUNT and site_name in warn_state:
+                del warn_state[site_name]
+                warn_state_dirty = True
+
             if len(all_notices) < MIN_NOTICE_COUNT:
                 # 구조 변경/selector 실패 가능성이 높아서 증거 확보 + 경고
                 save_debug_html(site_name, site["url"], response.text, f"too_few_{len(all_notices)}")
-                send_discord_warning(
-                    site_name,
-                    "공지 추출 개수가 너무 적음(구조 변경 가능)",
-                    f"count={len(all_notices)} (min={MIN_NOTICE_COUNT}), url={site['url']}",
-                    site=site,
-                )
+                if send_discord_warning_too_few_deduped(
+                    site_name, len(all_notices), response.text, site, warn_state
+                ):
+                    warn_state_dirty = True
                 site_warnings.append((site_name, f"too_few_{len(all_notices)}"))
                 # 그래도 1개라도 있으면 “새 공지” 체크는 진행 (완전 중단 대신 부분 동작)
                 if not all_notices:
@@ -404,6 +475,9 @@ def crawl_and_notify():
         save_latest_links(latest_links)
     else:
         print("[INFO] 변경된 내용이 없어 파일을 업데이트하지 않습니다.")
+
+    if warn_state_dirty:
+        save_warn_dedupe_state(warn_state)
 
     if site_warnings:
         print("[WARN] 사이트 경고 요약:")

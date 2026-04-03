@@ -75,7 +75,7 @@ jobs:
       run: |
         git config --global user.name 'github-actions[bot]'
         git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-        git add latest_links.json
+        git add latest_links.json crawler_warn_state.json
         # 파일에 변경사항이 있을 때만 커밋하고 푸시함
-        git diff --staged --quiet || git commit -m "Update latest announcement links"
+        git diff --staged --quiet || git commit -m "Update crawler state"
         git push
